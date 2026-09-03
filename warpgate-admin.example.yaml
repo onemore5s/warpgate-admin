@@ -1,0 +1,13 @@
+warpgate:
+  host: https://<warpgate-host>
+  token: <warpgate-token>
+  insecure_skip_verify: false
+
+inventory:
+  groups: groups.csv
+  targets: targets.csv
+
+apply:
+  update_passwords: false
+  sync_roles: false
+  sync_targets: false
