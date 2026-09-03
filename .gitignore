@@ -3,5 +3,7 @@
 /warpgate-admin
 /targets.local.csv
 /warpgate-admin.yaml
-/data/
+/data/*
+!/data/example/
+!/data/example/**
 *-warpgate-admin.yaml

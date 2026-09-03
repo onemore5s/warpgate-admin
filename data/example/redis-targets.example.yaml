@@ -1,0 +1,27 @@
+version: 1
+
+profiles:
+  example-read-write:
+    environment: EXAMPLE
+    permission: READ-WRITE
+    targets:
+      - standalone.example.invalid
+      - cluster.example.invalid
+
+targets:
+  standalone.example.invalid:
+    display_name: Example standalone Redis target
+    host: standalone.example.invalid
+    port: 6379
+    tls: true
+    cluster: false
+    auth:
+      mode: prompt
+  cluster.example.invalid:
+    display_name: Example Redis cluster target
+    host: cluster.example.invalid
+    port: 6379
+    tls: true
+    cluster: true
+    auth:
+      mode: prompt

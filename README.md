@@ -38,7 +38,7 @@ flowchart LR
 | `description` | No | Group description. |
 | `color` | No | One of `Primary`, `Secondary`, `Success`, `Danger`, `Warning`, `Info`, `Light`, or `Dark`. |
 
-See [groups.example.csv](groups.example.csv) for a template.
+See [groups.example.csv](data/example/groups.example.csv) for a template.
 
 ## targets.csv
 
@@ -60,7 +60,7 @@ See [groups.example.csv](groups.example.csv) for a template.
 | `default_database_name` | No | Default MySQL or PostgreSQL database. |
 | `protocol_version` | No | PostgreSQL protocol version `3.0` or `3.2`. Must be empty for MySQL. |
 
-See [targets.example.csv](targets.example.csv) for a template.
+See [targets.example.csv](data/example/targets.example.csv) for a template.
 
 The CSV files must contain every template column except `roles`. The `roles` column itself may be omitted for compatibility with older `targets.csv` files. Columns may appear in any order, but unknown columns are rejected. Blank rows are ignored.
 
