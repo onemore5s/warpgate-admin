@@ -1,0 +1,7 @@
+/bin/
+/coverage.out
+/warpgate-admin
+/targets.local.csv
+/warpgate-admin.yaml
+/data/
+*-warpgate-admin.yaml
