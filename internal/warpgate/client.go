@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"path"
 	"strings"
 	"time"
 )
@@ -22,6 +21,7 @@ const (
 
 	MySQLKind        = "MySql"
 	PostgresKind     = "Postgres"
+	HTTPKind         = "Http"
 	PasswordAuthKind = "Password"
 	TLSDisabled      = "Disabled"
 	TLSPreferred     = "Preferred"
@@ -65,6 +65,14 @@ type DatabaseAuth struct {
 	Password string `json:"password"`
 }
 
+type HTTPOptions struct {
+	Kind         string            `json:"kind"`
+	URL          string            `json:"url"`
+	TLS          TLS               `json:"tls"`
+	Headers      map[string]string `json:"headers"`
+	ExternalHost *string           `json:"external_host"`
+}
+
 type MySQLOptions struct {
 	Kind                string        `json:"kind"`
 	Host                string        `json:"host"`
@@ -99,6 +107,7 @@ type Target struct {
 	TicketMaxDurationSeconds *int64          `json:"ticket_max_duration_seconds"`
 	TicketRequestsDisabled   *bool           `json:"ticket_requests_disabled"`
 	TicketRequireApproval    *bool           `json:"ticket_require_approval"`
+	RequireApproval          *bool           `json:"require_approval"`
 	TicketMaxUses            *int            `json:"ticket_max_uses"`
 }
 
@@ -111,6 +120,7 @@ type TargetRequest struct {
 	TicketMaxDurationSeconds *int64 `json:"ticket_max_duration_seconds,omitempty"`
 	TicketRequestsDisabled   *bool  `json:"ticket_requests_disabled,omitempty"`
 	TicketRequireApproval    *bool  `json:"ticket_require_approval,omitempty"`
+	RequireApproval          *bool  `json:"require_approval,omitempty"`
 	TicketMaxUses            *int   `json:"ticket_max_uses,omitempty"`
 }
 
@@ -156,11 +166,7 @@ func NewClient(config Config) (*Client, error) {
 }
 
 func (client *Client) ListGroups(ctx context.Context) ([]TargetGroup, error) {
-	var result []TargetGroup
-	if err := client.do(ctx, http.MethodGet, "/target-groups", nil, &result); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return list[TargetGroup](ctx, client, "/target-groups")
 }
 
 func (client *Client) CreateGroup(ctx context.Context, request GroupRequest) (TargetGroup, error) {
@@ -176,11 +182,7 @@ func (client *Client) UpdateGroup(ctx context.Context, id string, request GroupR
 }
 
 func (client *Client) ListTargets(ctx context.Context) ([]Target, error) {
-	var result []Target
-	if err := client.do(ctx, http.MethodGet, "/targets", nil, &result); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return list[Target](ctx, client, "/targets")
 }
 
 func (client *Client) CreateTarget(ctx context.Context, request TargetRequest) (Target, error) {
@@ -200,20 +202,11 @@ func (client *Client) DeleteTarget(ctx context.Context, id string) error {
 }
 
 func (client *Client) ListRoles(ctx context.Context) ([]Role, error) {
-	var result []Role
-	if err := client.do(ctx, http.MethodGet, "/roles", nil, &result); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return list[Role](ctx, client, "/roles")
 }
 
 func (client *Client) ListTargetRoles(ctx context.Context, targetID string) ([]Role, error) {
-	var result []Role
-	endpoint := "/targets/" + url.PathEscape(targetID) + "/roles"
-	if err := client.do(ctx, http.MethodGet, endpoint, nil, &result); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return list[Role](ctx, client, "/targets/"+url.PathEscape(targetID)+"/roles")
 }
 
 func (client *Client) AddTargetRole(ctx context.Context, targetID, roleID string) error {
@@ -226,9 +219,16 @@ func (client *Client) RemoveTargetRole(ctx context.Context, targetID, roleID str
 	return client.do(ctx, http.MethodDelete, endpoint, nil, nil)
 }
 
+func list[T any](ctx context.Context, client *Client, endpoint string) ([]T, error) {
+	var result []T
+	if err := client.do(ctx, http.MethodGet, endpoint, nil, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 func (client *Client) do(ctx context.Context, method, endpoint string, requestBody, result any) error {
-	requestURL := *client.baseURL
-	requestURL.Path = path.Join(client.baseURL.Path, endpoint)
+	requestURL := client.baseURL.JoinPath(endpoint)
 
 	var body io.Reader
 	if requestBody != nil {
@@ -257,6 +257,12 @@ func (client *Client) do(ctx context.Context, method, endpoint string, requestBo
 	defer response.Body.Close()
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		if request, ok := requestBody.(TargetRequest); ok {
+			if _, httpTarget := request.Options.(HTTPOptions); httpTarget {
+				// Upstream errors may echo headers; return only the HTTP status and omit the response body.
+				return fmt.Errorf("Warpgate API %s %s returned %d (HTTP target error body redacted)", method, endpoint, response.StatusCode)
+			}
+		}
 		message, readErr := io.ReadAll(io.LimitReader(response.Body, maxErrorBodySize))
 		if readErr != nil {
 			return fmt.Errorf("Warpgate API %s %s returned %d and the response body could not be read: %w", method, endpoint, response.StatusCode, readErr)
