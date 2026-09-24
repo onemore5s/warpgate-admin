@@ -4,10 +4,12 @@ warpgate:
   insecure_skip_verify: false
 
 inventory:
-  groups: groups.csv
-  targets: targets.csv
+  groups: data/example/groups.csv
+  database_targets: data/example/database-targets.csv
+  http_targets: data/example/http-targets.yaml
 
 apply:
   update_passwords: false
   sync_roles: false
-  sync_targets: false
+  sync_database_targets: false
+  sync_http_targets: false

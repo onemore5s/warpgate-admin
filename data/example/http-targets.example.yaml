@@ -1,0 +1,15 @@
+targets:
+  - name: "<http-target-name>"
+    group: "<group-name>"
+    description: Example HTTP service
+    roles:
+      - "<role-name>"
+    url: https://service.example.invalid
+    tls:
+      mode: required
+      verify: true
+    external_host: service.warpgate.example.invalid
+    headers:
+      X-Example: "<header-value>"
+    headers_env:
+      Authorization: HTTP_AUTHORIZATION

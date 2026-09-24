@@ -1,0 +1,2 @@
+enabled,group,name,description,roles,engine,host,port,username,password,password_env,tls_mode,tls_verify,default_database_name,protocol_version
+true,<group-name>,<database-target-name>,Example database target,<role-name>,mysql,database.example.invalid,3306,<database-user>,,TARGET_PASSWORD_ENV_VAR,required,true,,

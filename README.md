@@ -1,120 +1,89 @@
 # Warpgate Admin
 
-`warpgate-admin` declares Warpgate resources from one YAML runtime configuration file and two CSV inventory files:
+`warpgate-admin` manages Warpgate Target Groups, MySQL / PostgreSQL database targets, HTTP targets, and role associations through declarative inventories.
 
-- `warpgate-admin.yaml` configures the Warpgate connection, CSV paths, and apply policies.
-- `groups.csv` manages Warpgate Target Groups, such as `<environment>-<region>`.
-- `targets.csv` manages RDS targets within those groups and can associate each target with existing Warpgate roles.
+- `warpgate-admin.yaml`: connection credentials, inventory paths, and synchronization policies.
+- `groups.csv`: groups managed in the current environment.
+- `database-targets.csv`: database connections and roles.
+- `http-targets.yaml`: HTTP URLs, TLS settings, domains, headers, and roles.
 
-MySQL and PostgreSQL RDS targets are currently supported. The tool provides the following commands:
-
-- `validate` validates both CSV files without accessing Warpgate or resolving `password_env` values.
-- `plan` queries the Warpgate Admin API, resolves password references, and shows the resources and associations that would be created, updated, or removed.
-- `apply` creates or updates Target Groups and RDS Targets, adds or synchronizes target-role associations according to the configuration, and can optionally delete RDS Targets that are absent from the inventory.
-
-`apply` never deletes Target Groups. `apply.sync_targets` defaults to `false`, so RDS Targets that are missing from the CSV or represented by rows with `enabled=false` remain unchanged in Warpgate. When explicitly enabled, each enabled Group in `groups.csv` becomes part of the synchronization scope, and MySQL or PostgreSQL Targets within that scope are deleted when they are absent from `targets.csv`. Other Target types, such as SSH and Kubernetes, are never deleted. Target-role associations are additive by default; when `apply.sync_roles` is explicitly enabled, the `roles` column becomes the desired role set.
+Configure at least one database or HTTP inventory. HTTP-only management is supported.
 
 ## Workflow
 
+```text
+Configuration + groups + database/HTTP inventories
+                         |
+                      validate
+                         |
+                        plan
+                         |
+                   Review changes
+                         |
+                       apply
+                         |
+                Warpgate Admin API
+```
+
 ```mermaid
-flowchart LR
-    A[Maintain warpgate-admin.yaml] --> C[validate]
-    B[Maintain groups.csv and targets.csv] --> C
-    C --> D[plan]
-    D --> E{Review changes}
-    E -->|Approved| F[apply]
-    F --> G[Warpgate Admin API]
-    G --> H[Target Groups]
-    G --> I[MySQL and PostgreSQL Targets]
-    G --> J[Target Role Associations]
+flowchart TD
+    A[Configuration, groups, and target inventories] --> B[validate]
+    B --> C[plan]
+    C --> D[Review changes]
+    D --> E[apply]
+    E --> F[Warpgate Admin API]
 ```
 
-## groups.csv
+- `validate`: checks local files without accessing Warpgate or resolving password and header environment variables.
+- `plan`: queries existing resources, resolves credentials, and displays creates `+`, updates `~`, and deletions `-`.
+- `apply`: recalculates and applies the plan. Resource names are stable reconciliation keys; applying the same inventory repeatedly should produce no additional changes.
 
-| Column | Required | Description |
-| --- | --- | --- |
-| `enabled` | No | Defaults to `true` when empty. `false` ignores the Group and excludes it from the target synchronization scope. |
-| `name` | Yes | Unique Target Group name, up to 255 characters. |
-| `description` | No | Group description. |
-| `color` | No | One of `Primary`, `Secondary`, `Success`, `Danger`, `Warning`, `Info`, `Light`, or `Dark`. |
+`plan` never prints passwords or header values. Failed HTTP writes report the API status and hide response bodies that might echo credentials.
 
-See [groups.example.csv](data/example/groups.example.csv) for a template.
+## Test and production environments
 
-## targets.csv
+Maintain separate configurations and inventories:
 
-| Column | Required | Description |
-| --- | --- | --- |
-| `enabled` | No | Defaults to `true` when empty. `false` ignores the row. When `apply.sync_targets` is enabled, an existing RDS Target with the same name is deleted because it is absent from the desired inventory. |
-| `group` | Yes | Name of an enabled group in `groups.csv`. |
-| `name` | Yes | Unique Warpgate Target name, up to 255 characters. |
-| `description` | No | Target description. |
-| `roles` | No | Names of existing Warpgate roles, separated by `;`, for example `<role-name-1>;<role-name-2>`. Associations are additive by default; with `apply.sync_roles` enabled, this becomes the complete desired role set. |
-| `engine` | Yes | `mysql` or `postgres`. |
-| `host` | Yes | RDS endpoint hostname without a port. |
-| `port` | Yes | Database port from `1` to `65535`. |
-| `username` | Yes | Database username. |
-| `password` | Conditionally | Plaintext database password. Only one of `password` and `password_env` may be set. Both may be empty for MySQL to use an empty password. |
-| `password_env` | Conditionally | Environment variable containing the database password. Only one of `password` and `password_env` may be set. PostgreSQL requires one of them. |
-| `tls_mode` | No | `disabled`, `preferred`, or `required`. Defaults to `required` when empty. |
-| `tls_verify` | No | Whether to verify the TLS certificate. Defaults to `true` when empty. |
-| `default_database_name` | No | Default MySQL or PostgreSQL database. |
-| `protocol_version` | No | PostgreSQL protocol version `3.0` or `3.2`. Must be empty for MySQL. |
-
-See [targets.example.csv](data/example/targets.example.csv) for a template.
-
-The CSV files must contain every template column except `roles`. The `roles` column itself may be omitted for compatibility with older `targets.csv` files. Columns may appear in any order, but unknown columns are rejected. Blank rows are ignored.
-
-When associating roles with a target, `plan` and `apply` first look up existing Warpgate roles by name. The command stops with an error if a role does not exist. The Admin API token must be authorized to assign access roles.
-
-`apply.sync_roles` defaults to `false`, so `apply` only adds missing associations and never removes existing ones. When set to `true`:
-
-- If the `roles` column is absent, role associations are not managed for any target in that CSV file.
-- If the `roles` column is present and nonempty, missing roles are added and unlisted roles are removed.
-- If the `roles` column is present but a cell is empty, all roles are removed from that target.
-
-```csv
-enabled,group,name,description,roles,engine,host,port,username,password,password_env,tls_mode,tls_verify,default_database_name,protocol_version
-true,<group-name>,<target-name>,<description>,<role-name-1>;<role-name-2>,mysql,<rds-endpoint>,<port>,<username>,,TARGET_PASSWORD_ENV_VAR,required,true,,
+```text
+data/
++-- test/
+|   +-- warpgate-admin.yaml
+|   +-- groups.csv
+|   +-- database-targets.csv
+|   +-- http-targets.yaml
++-- prod/
+    +-- warpgate-admin.yaml
+    +-- groups.csv
+    +-- database-targets.csv
+    +-- http-targets.yaml
 ```
 
-## Password management
-
-The tool accepts a plaintext password in the `password` column. However, a CSV file containing plaintext passwords must not be committed to Git or shared through ordinary chat or email.
-
-A MySQL target may leave both `password` and `password_env` empty to use an empty password. A PostgreSQL target must still provide one of them.
-
-For files committed to Git, use an environment variable reference in `targets.csv`:
-
-```csv
-enabled,group,name,description,engine,host,port,username,password,password_env,tls_mode,tls_verify,default_database_name,protocol_version
-true,<group-name>,<target-name>,<description>,mysql,<rds-endpoint>,<port>,<username>,,RDS_TARGET_PASSWORD,required,true,,
-```
-
-Set the actual password before running `plan` or `apply`:
+Use the shared templates in [data/example](data/example/) to initialize separate test and production inventories. To initialize a test environment, copy the templates into an unused directory:
 
 ```shell
-export RDS_TARGET_PASSWORD='<database-password>'
+mkdir -p data/test
+cp -n warpgate-admin.example.yaml data/test/warpgate-admin.yaml
+cp -n data/example/groups.example.csv data/test/groups.csv
+cp -n data/example/database-targets.example.csv data/test/database-targets.csv
+cp -n data/example/http-targets.example.yaml data/test/http-targets.yaml
+chmod 600 data/test/warpgate-admin.yaml
 ```
 
-If a plaintext password must be stored locally in a CSV file, use `targets.local.csv`. This file is excluded by `.gitignore`.
-
-## Build
-
-Go 1.26 or later is required:
+In the copied configuration, set the inventory paths to `groups.csv`, `database-targets.csv`, and `http-targets.yaml`, relative to that configuration file. Repeat these steps with `data/prod` for production. Replace the example domains, names, roles, and credentials in each environment before running:
 
 ```shell
-go build -o warpgate-admin ./cmd/warpgate-admin
+./warpgate-admin validate --config data/test/warpgate-admin.yaml
+./warpgate-admin plan --config data/test/warpgate-admin.yaml
+./warpgate-admin apply --config data/test/warpgate-admin.yaml
+
+./warpgate-admin plan --config data/prod/warpgate-admin.yaml
 ```
+
+If both environments share a Warpgate instance, use non-overlapping Groups and globally unique target names, preferably with environment prefixes. Directory names do not provide isolation; the configured groups and inventory types determine the deletion scope.
+
+`data/test/`, `data/prod/`, and runtime configurations are excluded from Git by default. `data/example/` contains templates only. To version actual inventories, place files without plaintext credentials in a separate directory and adjust the configured paths.
 
 ## YAML configuration
-
-Copy the template and provide the actual endpoint and inventory paths:
-
-```shell
-cp warpgate-admin.example.yaml warpgate-admin.yaml
-```
-
-The configuration has the following structure:
 
 ```yaml
 warpgate:
@@ -124,95 +93,158 @@ warpgate:
 
 inventory:
   groups: groups.csv
-  targets: targets.csv
+  database_targets: database-targets.csv
+  http_targets: http-targets.yaml
 
 apply:
   update_passwords: false
   sync_roles: false
-  sync_targets: false
+  sync_database_targets: false
+  sync_http_targets: false
 ```
 
-| Field | Required | Description |
+Relative inventory paths are resolved from the configuration file's directory. `groups` is required, along with at least one of `database_targets` or `http_targets`. Unknown fields, duplicate fields, and multiple YAML documents are rejected.
+
+`warpgate.host` accepts an instance root URL or an API URL containing `/@warpgate/admin/api`. `plan` and `apply` require `host` and `token`; `validate` does not require connection settings. Connection settings are read only from YAML and cannot be overridden by environment variables.
+
+`insecure_skip_verify` controls certificate verification for the Admin API independently of target TLS settings. Certificate verification is enabled by default.
+
+## groups.csv
+
+| Column | Required | Description |
 | --- | --- | --- |
-| `warpgate.host` | For `plan` and `apply` | Warpgate root URL or an API URL containing `/@warpgate/admin/api`. |
-| `warpgate.token` | For `plan` and `apply` | Warpgate Admin API token. |
-| `warpgate.insecure_skip_verify` | No | Whether to skip TLS certificate verification for the Warpgate Admin API. Defaults to `false`. |
-| `inventory.groups` | Yes | Path to the groups CSV file. |
-| `inventory.targets` | Yes | Path to the targets CSV file. |
-| `apply.update_passwords` | No | Whether to force password updates for every managed RDS target by default. Defaults to `false`. |
-| `apply.sync_roles` | No | Whether to treat the `roles` column as the complete desired set and remove extra associations. Defaults to `false`. |
-| `apply.sync_targets` | No | Whether to delete MySQL and PostgreSQL Targets that are absent from the targets CSV within enabled Groups. Defaults to `false`. |
+| `enabled` | No | Defaults to `true` when empty. Groups set to `false` are excluded from synchronization. |
+| `name` | Yes | Unique group name, up to 255 characters. |
+| `description` | No | Group description. |
+| `color` | No | `Primary`, `Secondary`, `Success`, `Danger`, `Warning`, `Info`, `Light`, or `Dark`. |
 
-Relative CSV paths are resolved from the directory containing the YAML file. Unknown YAML fields are rejected, so misspelled fields cause an error. Warpgate `host`, `token`, and `insecure_skip_verify` values are read only from YAML and cannot be overridden by environment variables. The `--groups`, `--targets`, and `--update-passwords` flags can override or augment the YAML inventory and apply settings.
+See the [group template](data/example/groups.example.csv).
 
-The production configuration contains credentials and is excluded as `warpgate-admin.yaml` by `.gitignore`. Restrict it to owner read and write permissions:
+## database-targets.csv
 
-```shell
-chmod 600 warpgate-admin.yaml
-```
+| Column | Required | Description |
+| --- | --- | --- |
+| `enabled` | No | Defaults to `true` when empty. Rows set to `false` are excluded from the desired inventory. |
+| `group` | Yes | An enabled group in the current groups.csv. |
+| `name` | Yes | Unique target name, up to 255 characters. |
+| `description` | No | Target description. |
+| `roles` | No | Existing Warpgate role names separated by `;`. |
+| `engine` | Yes | `mysql` or `postgres`. |
+| `host` | Yes | Database hostname without a port. |
+| `port` | Yes | A number from `1` to `65535`. |
+| `username` | Yes | Database username. |
+| `password` | Conditionally | Plaintext password. Cannot be set together with `password_env`. |
+| `password_env` | Conditionally | Password environment variable name. PostgreSQL requires one password source; MySQL allows an empty password. |
+| `tls_mode` | No | `disabled`, `preferred`, or `required`. Defaults to `required`. |
+| `tls_verify` | No | Defaults to `true`. |
+| `default_database_name` | No | Default database name. |
+| `protocol_version` | No | PostgreSQL supports `3.0` or `3.2`. Must be empty for MySQL. |
 
-`insecure_skip_verify` disables TLS certificate verification for the Warpgate Admin API. It is unrelated to `tls_mode` and `tls_verify`, which control RDS connections in `targets.csv`.
+See the [database template](data/example/database-targets.example.csv). Every template column except `roles` must be present. Columns may appear in any order; unknown columns are rejected and blank rows are ignored. Cells may be left empty as described above.
 
-## Usage
+Use `password_env` for inventories committed to Git. Store local inventories containing plaintext passwords in ignored `*.local.csv` files.
 
-Validate the configuration and both inventory files:
-
-```shell
-./warpgate-admin validate --config warpgate-admin.yaml
-```
-
-Preview changes:
-
-```shell
-./warpgate-admin plan --config warpgate-admin.yaml
-```
-
-Apply the reviewed plan:
-
-```shell
-./warpgate-admin apply --config warpgate-admin.yaml
-```
-
-Target names are stable reconciliation keys. Repeatedly applying the same inventory is idempotent. `plan` uses `+` for creates or new associations, `~` for updates, and `-` for removals, and never prints database passwords.
-
-When credential encryption is enabled in Warpgate, the Admin API returns only an encrypted envelope and cannot be used to determine whether the source password has changed. By default, `plan` treats that password as incomparable while remaining idempotent. To rotate passwords for existing RDS targets, explicitly run:
-
-```shell
-./warpgate-admin plan --config warpgate-admin.yaml --update-passwords
-./warpgate-admin apply --config warpgate-admin.yaml --update-passwords
-```
-
-This option forces a password update for every existing enabled RDS target in `targets.csv`. It can also be enabled temporarily with `apply.update_passwords: true` in YAML. New targets always receive their configured password and do not require this option.
-
-To fully synchronize Warpgate RDS Targets with the CSV inventory, explicitly enable:
+When Warpgate returns an encrypted password, its plaintext cannot be compared with the inventory. The default behavior remains idempotent. To rotate passwords on existing database targets, temporarily enable the following policy in the environment's YAML configuration:
 
 ```yaml
 apply:
-  sync_targets: true
+  update_passwords: true
 ```
 
-The synchronization scope consists of enabled Groups in the current `groups.csv`. For each MySQL or PostgreSQL Target within that scope:
-
-- If a target with the same name exists in `targets.csv`, it is created or updated.
-- If it is absent from `targets.csv`, or its row has `enabled=false`, `plan` marks it with `-` and `apply` deletes it.
-- If the Target belongs to another Group or has a non-RDS type such as SSH or Kubernetes, it remains unchanged.
-
-If Test and Production use different targets CSV files, use a corresponding groups CSV file for each environment to prevent one synchronization run from affecting the other environment's Groups. Renaming a Target appears as creating the new name and deleting the old one. Review every deletion in `plan` before running `apply`. The Admin API token must be authorized to delete Targets.
-
-YAML is optional when only validating CSV files:
+Review and apply the resulting updates:
 
 ```shell
-./warpgate-admin validate --groups groups.csv --targets targets.csv
+./warpgate-admin plan --config data/test/warpgate-admin.yaml
+./warpgate-admin apply --config data/test/warpgate-admin.yaml
 ```
 
-`plan` and `apply` require a Warpgate connection supplied through `--config`.
+Set `apply.update_passwords` back to `false` after rotation. This option forces updates only for database targets; HTTP targets are unaffected. New database targets always receive their configured passwords.
 
-When updating an existing target, the tool preserves rate limits and ticket policies that are not managed by the CSV inventory. It refuses to replace a same-named SSH, Kubernetes, or other Target type with an RDS Target, and it also refuses to switch between MySQL and PostgreSQL.
+## http-targets.yaml
 
-The Warpgate Admin API does not provide transactions. If an `apply` operation fails partway through, successful changes are not rolled back automatically. Fix the error, then rerun `plan` and `apply` to continue converging toward the desired state.
+```yaml
+targets:
+  - name: "<http-target-name>"
+    group: "<group-name>"
+    description: "<description>"
+    roles:
+      - "<role-name>"
+    url: https://service.example.invalid
+    tls:
+      mode: required
+      verify: true
+    external_host: service.warpgate.example.invalid
+    headers:
+      X-Example: "<header-value>"
+    headers_env:
+      Authorization: HTTP_AUTHORIZATION
+```
 
-## Test
+See the [HTTP template](data/example/http-targets.example.yaml). HTTP API fields follow the [Warpgate documentation](https://warpgate.null.page/targets/http/). This tool adds `headers_env` to resolve environment variable references into Warpgate's `headers` map.
+
+| Field | Description |
+| --- | --- |
+| `enabled` | Optional; enabled by default. `false` excludes the entry from the desired inventory. |
+| `name`, `group` | Required. Target names must also be unique across database and HTTP inventories. |
+| `description` | Optional; omission means an empty description. |
+| `roles` | Optional role list; see the next section for synchronization behavior. |
+| `url` | Required absolute HTTP(S) URL. Ports and paths are allowed; usernames, passwords, and fragments are rejected. |
+| `tls.mode` | Defaults to `disabled` for HTTP and `required` for HTTPS. HTTPS also accepts explicit `preferred`. Conflicting schemes and modes are rejected. |
+| `tls.verify` | Defaults to `true`. Set explicitly to `false` for an internal service with a self-signed certificate if needed. |
+| `external_host` | Optional bound domain without a scheme, port, or path. Omission preserves the current value; `""` clears the binding. Configure DNS and certificates separately. |
+| `headers` | Map of literal request headers. |
+| `headers_env` | Map of header names to environment variable names. Each variable holds the complete header value, such as a complete Bearer authorization value. |
+
+Omitting both `headers` and `headers_env` preserves existing headers. Configuring either map makes their combined contents the complete desired header set. Use `headers: {}` to clear headers explicitly. Header names are case-insensitive; duplicates, conflicting sources, invalid names, and control characters are rejected. Empty or unset environment variables cause `plan` and `apply` to fail before any writes.
+
+An empty HTTP inventory must explicitly contain `targets: []`. Empty files, missing `targets`, and invalid YAML are rejected so that input mistakes cannot be interpreted as requests to delete all targets.
+
+## Role and deletion synchronization
+
+`apply.sync_roles` defaults to `false`, adding only missing associations. When enabled:
+
+- Omitting the database `roles` column or the HTTP `roles` field preserves existing roles.
+- Providing roles synchronizes associations to the complete desired set.
+- An empty database `roles` cell or HTTP `roles: []` clears role associations.
+
+Roles must already exist, and the API token must have the required permissions.
+
+`sync_database_targets` and `sync_http_targets` both default to `false` and control deletion only for their respective types. When enabled, the deletion scope consists of targets of that type in the currently enabled Groups that are absent from the desired inventory, including entries marked `enabled: false`.
+
+**If an inventory type is not configured, targets of that type are neither managed nor deleted, even when its synchronization option is enabled.** Missing or invalid configured files fail the entire operation before any writes. An explicitly empty inventory can clear its corresponding scope; review `plan` first.
+
+The tool never deletes Groups, SSH targets, or Kubernetes targets, and it refuses to change the protocol of a same-named target. Updates preserve unmanaged rate limits, session approval requirements, and ticket policies. With deletion synchronization enabled, a rename appears as creating the new name and deleting the old one.
+
+The Warpgate Admin API does not provide transactions. If `apply` fails partway through, successful operations are not rolled back automatically. Fix the error and rerun `plan` and `apply`.
+
+## CLI
+
+`validate`, `plan`, and `apply` require `--config`. All inventory paths and apply policies come from that YAML file; command-line overrides are not supported. Use `apply.sync_database_targets` and `apply.sync_http_targets` to control deletion for each type. Previous generic inventory and synchronization names are no longer accepted.
 
 ```shell
+./warpgate-admin validate --config data/test/warpgate-admin.yaml
+./warpgate-admin plan --config data/test/warpgate-admin.yaml
+./warpgate-admin apply --config data/test/warpgate-admin.yaml
+./warpgate-admin help
+./warpgate-admin version
+```
+
+`help`, `version`, and command help do not require a configuration file. For local validation, a minimal configuration can contain only inventory paths:
+
+```yaml
+inventory:
+  groups: groups.csv
+  http_targets: http-targets.yaml
+```
+
+Run `validate --config <path>` to check those files without connection credentials, environment variable resolution, or API access.
+
+## Build and test
+
+Go 1.26 or later is required.
+
+```shell
+go build -o warpgate-admin ./cmd/warpgate-admin
 go test ./...
+go test -race ./...
 ```

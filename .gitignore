@@ -2,7 +2,12 @@
 /coverage.out
 /warpgate-admin
 /targets.local.csv
+*.local.csv
+*.local.yaml
 /warpgate-admin.yaml
+warpgate-admin.yaml
+warpgate-admin.test.yaml
+warpgate-admin.prod.yaml
 /data/*
 !/data/example/
 !/data/example/**

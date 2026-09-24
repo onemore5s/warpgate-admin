@@ -1,2 +1,0 @@
-enabled,group,name,description,roles,engine,host,port,username,password,password_env,tls_mode,tls_verify,default_database_name,protocol_version
-true,example-group,example-target,Example MySQL RDS target,example-role,mysql,database.example.invalid,3306,example-user,,TARGET_PASSWORD_ENV_VAR,required,true,,
