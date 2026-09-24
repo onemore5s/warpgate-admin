@@ -66,9 +66,6 @@ func runInventoryCommand(ctx context.Context, command string, args []string, dep
 		fmt.Fprintf(stderr, "Usage: warpgate-admin %s --config <warpgate-admin.yaml>\n", command)
 	}
 	configFileName := flags.String("config", "", "YAML configuration file path")
-	groupsFileName := flags.String("groups", "", "Target Group CSV path")
-	targetsFileName := flags.String("targets", "", "RDS Target CSV path")
-	updatePasswords := flags.Bool("update-passwords", false, "force password updates for all managed RDS targets")
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return 0
@@ -79,51 +76,50 @@ func runInventoryCommand(ctx context.Context, command string, args []string, dep
 		fmt.Fprintf(stderr, "Positional arguments are not supported: %v.\n", flags.Args())
 		return 2
 	}
-
-	var fileConfig appconfig.File
-	if *configFileName != "" {
-		configFile, openErr := deps.openFile(*configFileName)
-		if openErr != nil {
-			fmt.Fprintf(stderr, "Failed to open configuration file: %v.\n", openErr)
-			return 1
-		}
-		parsed, parseErr := appconfig.Parse(configFile)
-		_ = configFile.Close()
-		if parseErr != nil {
-			fmt.Fprintf(stderr, "Configuration validation failed: %v.\n", parseErr)
-			return 1
-		}
-		fileConfig = parsed.ResolvePaths(*configFileName)
-		if *groupsFileName == "" {
-			*groupsFileName = fileConfig.Inventory.Groups
-		}
-		if *targetsFileName == "" {
-			*targetsFileName = fileConfig.Inventory.Targets
-		}
-	}
-	if *groupsFileName == "" {
-		fmt.Fprintln(stderr, "Specify the groups inventory with either --config or --groups.")
+	if *configFileName == "" {
+		fmt.Fprintln(stderr, "Specify the YAML configuration file with --config.")
 		return 2
 	}
-	if *targetsFileName == "" {
-		fmt.Fprintln(stderr, "Specify the targets inventory with either --config or --targets.")
-		return 2
+	configFile, err := deps.openFile(*configFileName)
+	if err != nil {
+		fmt.Fprintf(stderr, "Failed to open configuration file: %v.\n", err)
+		return 1
 	}
+	parsed, parseErr := appconfig.Parse(configFile)
+	_ = configFile.Close()
+	if parseErr != nil {
+		fmt.Fprintf(stderr, "Configuration validation failed: %v.\n", parseErr)
+		return 1
+	}
+	fileConfig := parsed.ResolvePaths(*configFileName)
 
-	groupsFile, err := deps.openFile(*groupsFileName)
+	groupsFile, err := deps.openFile(fileConfig.Inventory.Groups)
 	if err != nil {
 		fmt.Fprintf(stderr, "Failed to open groups inventory: %v.\n", err)
 		return 1
 	}
 	defer groupsFile.Close()
-	targetsFile, err := deps.openFile(*targetsFileName)
-	if err != nil {
-		fmt.Fprintf(stderr, "Failed to open targets inventory: %v.\n", err)
-		return 1
+	var databaseInput, httpInput io.Reader
+	if fileConfig.Inventory.DatabaseTargets != "" {
+		file, err := deps.openFile(fileConfig.Inventory.DatabaseTargets)
+		if err != nil {
+			fmt.Fprintf(stderr, "Failed to open database targets inventory: %v.\n", err)
+			return 1
+		}
+		defer file.Close()
+		databaseInput = file
 	}
-	defer targetsFile.Close()
+	if fileConfig.Inventory.HTTPTargets != "" {
+		file, err := deps.openFile(fileConfig.Inventory.HTTPTargets)
+		if err != nil {
+			fmt.Fprintf(stderr, "Failed to open HTTP targets inventory: %v.\n", err)
+			return 1
+		}
+		defer file.Close()
+		httpInput = file
+	}
 
-	desired, err := inventory.Parse(groupsFile, targetsFile)
+	desired, err := inventory.ParseSources(groupsFile, databaseInput, httpInput)
 	if err != nil {
 		fmt.Fprintf(stderr, "Inventory validation failed: %v.\n", err)
 		return 1
@@ -138,9 +134,9 @@ func runInventoryCommand(ctx context.Context, command string, args []string, dep
 		fmt.Fprintf(stderr, "Configuration error: %v.\n", err)
 		return 2
 	}
-	desired, err = inventory.ResolvePasswords(desired, deps.getenv)
+	desired, err = inventory.ResolveSecrets(desired, deps.getenv)
 	if err != nil {
-		fmt.Fprintf(stderr, "Failed to resolve RDS passwords: %v.\n", err)
+		fmt.Fprintf(stderr, "Failed to resolve target credentials: %v.\n", err)
 		return 2
 	}
 	api, err := deps.newAPI(clientConfig)
@@ -149,14 +145,17 @@ func runInventoryCommand(ctx context.Context, command string, args []string, dep
 		return 1
 	}
 	var reconcileOptions []reconcile.Option
-	if *updatePasswords || fileConfig.Apply.UpdatePasswords {
+	if fileConfig.Apply.UpdatePasswords {
 		reconcileOptions = append(reconcileOptions, reconcile.WithPasswordUpdates())
 	}
 	if fileConfig.Apply.SyncRoles {
 		reconcileOptions = append(reconcileOptions, reconcile.WithRoleSync())
 	}
-	if fileConfig.Apply.SyncTargets {
-		reconcileOptions = append(reconcileOptions, reconcile.WithTargetSync())
+	if fileConfig.Apply.SyncDatabaseTargets && fileConfig.Inventory.DatabaseTargets != "" {
+		reconcileOptions = append(reconcileOptions, reconcile.WithDatabaseTargetSync())
+	}
+	if fileConfig.Apply.SyncHTTPTargets && fileConfig.Inventory.HTTPTargets != "" {
+		reconcileOptions = append(reconcileOptions, reconcile.WithHTTPTargetSync())
 	}
 	reconciler := reconcile.New(api, reconcileOptions...)
 
@@ -199,18 +198,14 @@ func printUsage(output io.Writer) {
   warpgate-admin validate --config <warpgate-admin.yaml>
   warpgate-admin plan     --config <warpgate-admin.yaml>
   warpgate-admin apply    --config <warpgate-admin.yaml>
-
-Validate CSV files without YAML:
-  warpgate-admin validate --groups <groups.csv> --targets <targets.csv>
+  warpgate-admin help
+  warpgate-admin version
 
 Options:
-  --config <path>                   YAML configuration file
-  --groups <path>                   override the groups CSV path from YAML
-  --targets <path>                  override the targets CSV path from YAML
-  --update-passwords               force password updates for all managed RDS targets
+  --config <path>    required YAML configuration file
 
-RDS password environment variables:
-  <password_env>                    variable referenced by targets.csv`)
+Configure inventory paths and apply policies in YAML.
+validate checks local files without accessing Warpgate or resolving credentials.`)
 }
 
 func plural(count int, singular, pluralForm string) string {

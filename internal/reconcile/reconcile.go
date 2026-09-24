@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
 	"sort"
 	"strings"
@@ -122,10 +123,11 @@ func (plan Plan) String() string {
 }
 
 type Reconciler struct {
-	api             API
-	updatePasswords bool
-	syncRoles       bool
-	syncTargets     bool
+	api                 API
+	updatePasswords     bool
+	syncRoles           bool
+	syncDatabaseTargets bool
+	syncHTTPTargets     bool
 }
 
 type Option func(*Reconciler)
@@ -142,10 +144,14 @@ func WithRoleSync() Option {
 	}
 }
 
-func WithTargetSync() Option {
+func WithDatabaseTargetSync() Option {
 	return func(reconciler *Reconciler) {
-		reconciler.syncTargets = true
+		reconciler.syncDatabaseTargets = true
 	}
+}
+
+func WithHTTPTargetSync() Option {
+	return func(reconciler *Reconciler) { reconciler.syncHTTPTargets = true }
 }
 
 func New(api API, options ...Option) *Reconciler {
@@ -166,11 +172,11 @@ func (reconciler *Reconciler) Plan(ctx context.Context, desired inventory.Invent
 		return Plan{}, fmt.Errorf("list targets: %w", err)
 	}
 
-	groupsByName, err := uniqueGroups(groups)
+	groupsByName, err := uniqueByName(groups, func(group *warpgate.TargetGroup) string { return group.Name }, "group")
 	if err != nil {
 		return Plan{}, err
 	}
-	targetsByName, err := uniqueTargets(targets)
+	targetsByName, err := uniqueByName(targets, func(target *warpgate.Target) string { return target.Name }, "target")
 	if err != nil {
 		return Plan{}, err
 	}
@@ -180,7 +186,7 @@ func (reconciler *Reconciler) Plan(ctx context.Context, desired inventory.Invent
 		if listErr != nil {
 			return Plan{}, fmt.Errorf("list roles: %w", listErr)
 		}
-		rolesByName, err = uniqueRoles(roles)
+		rolesByName, err = uniqueByName(roles, func(role *warpgate.Role) string { return role.Name }, "role")
 		if err != nil {
 			return Plan{}, err
 		}
@@ -188,8 +194,8 @@ func (reconciler *Reconciler) Plan(ctx context.Context, desired inventory.Invent
 
 	desired.Groups = append([]inventory.Group(nil), desired.Groups...)
 	desired.Targets = append([]inventory.Target(nil), desired.Targets...)
-	sort.Slice(desired.Groups, func(i, j int) bool { return desired.Groups[i].Name < desired.Groups[j].Name })
-	sort.Slice(desired.Targets, func(i, j int) bool { return desired.Targets[i].Name < desired.Targets[j].Name })
+	sortByName(desired.Groups, func(group inventory.Group) string { return group.Name })
+	sortByName(desired.Targets, func(target inventory.Target) string { return target.Name })
 
 	plan := Plan{}
 	for _, group := range desired.Groups {
@@ -205,7 +211,7 @@ func (reconciler *Reconciler) Plan(ctx context.Context, desired inventory.Invent
 	}
 
 	for _, target := range desired.Targets {
-		if _, optionsErr := databaseOptions(target); optionsErr != nil {
+		if _, optionsErr := targetOptions(target); optionsErr != nil {
 			return Plan{}, fmt.Errorf("target %q: %w", target.Name, optionsErr)
 		}
 		current := targetsByName[target.Name]
@@ -222,7 +228,7 @@ func (reconciler *Reconciler) Plan(ctx context.Context, desired inventory.Invent
 				return Plan{}, fmt.Errorf("target %q: %w", target.Name, matchErr)
 			}
 			action = ActionUpdate
-			if groupExists && matches && !reconciler.updatePasswords {
+			if groupExists && matches && !(reconciler.updatePasswords && target.Engine != inventory.EngineHTTP) {
 				action = ActionUnchanged
 			}
 		}
@@ -232,12 +238,12 @@ func (reconciler *Reconciler) Plan(ctx context.Context, desired inventory.Invent
 		sort.Strings(requestedRoles)
 		rolesManaged := target.RolesSpecified || len(requestedRoles) > 0
 		currentRolesByName := map[string]*warpgate.Role{}
-		if current != nil && (len(requestedRoles) > 0 || reconciler.syncRoles && rolesManaged) {
+		if current != nil && (len(requestedRoles) > 0 || reconciler.syncRoles && target.RolesSpecified) {
 			currentRoles, listErr := reconciler.api.ListTargetRoles(ctx, current.ID)
 			if listErr != nil {
 				return Plan{}, fmt.Errorf("list roles for target %q: %w", target.Name, listErr)
 			}
-			currentRolesByName, err = uniqueRoles(currentRoles)
+			currentRolesByName, err = uniqueByName(currentRoles, func(role *warpgate.Role) string { return role.Name }, "role")
 			if err != nil {
 				return Plan{}, fmt.Errorf("target %q: %w", target.Name, err)
 			}
@@ -281,7 +287,7 @@ func (reconciler *Reconciler) Plan(ctx context.Context, desired inventory.Invent
 		}
 	}
 
-	if reconciler.syncTargets {
+	if reconciler.syncDatabaseTargets || reconciler.syncHTTPTargets {
 		managedGroupIDs := make(map[string]struct{}, len(desired.Groups))
 		for _, group := range desired.Groups {
 			if current := groupsByName[group.Name]; current != nil {
@@ -293,7 +299,7 @@ func (reconciler *Reconciler) Plan(ctx context.Context, desired inventory.Invent
 			desiredTargetNames[target.Name] = struct{}{}
 		}
 		currentTargets := append([]warpgate.Target(nil), targets...)
-		sort.Slice(currentTargets, func(i, j int) bool { return currentTargets[i].Name < currentTargets[j].Name })
+		sortByName(currentTargets, func(target warpgate.Target) string { return target.Name })
 		for index := range currentTargets {
 			current := &currentTargets[index]
 			if _, exists := desiredTargetNames[current.Name]; exists {
@@ -302,7 +308,7 @@ func (reconciler *Reconciler) Plan(ctx context.Context, desired inventory.Invent
 			if _, managed := managedGroupIDs[current.GroupID]; !managed {
 				continue
 			}
-			managed, classifyErr := isManagedRDSTarget(*current)
+			managed, classifyErr := reconciler.isManagedTarget(*current)
 			if classifyErr != nil {
 				return Plan{}, fmt.Errorf("classify target %q: %w", current.Name, classifyErr)
 			}
@@ -399,38 +405,15 @@ func (reconciler *Reconciler) Apply(ctx context.Context, desired inventory.Inven
 	return plan, nil
 }
 
-func uniqueGroups(groups []warpgate.TargetGroup) (map[string]*warpgate.TargetGroup, error) {
-	result := make(map[string]*warpgate.TargetGroup, len(groups))
-	for index := range groups {
-		group := &groups[index]
-		if _, exists := result[group.Name]; exists {
-			return nil, fmt.Errorf("Warpgate returned duplicate group name %q", group.Name)
+func uniqueByName[T any](items []T, name func(*T) string, kind string) (map[string]*T, error) {
+	result := make(map[string]*T, len(items))
+	for index := range items {
+		item := &items[index]
+		key := name(item)
+		if _, exists := result[key]; exists {
+			return nil, fmt.Errorf("Warpgate returned duplicate %s name %q", kind, key)
 		}
-		result[group.Name] = group
-	}
-	return result, nil
-}
-
-func uniqueTargets(targets []warpgate.Target) (map[string]*warpgate.Target, error) {
-	result := make(map[string]*warpgate.Target, len(targets))
-	for index := range targets {
-		target := &targets[index]
-		if _, exists := result[target.Name]; exists {
-			return nil, fmt.Errorf("Warpgate returned duplicate target name %q", target.Name)
-		}
-		result[target.Name] = target
-	}
-	return result, nil
-}
-
-func uniqueRoles(roles []warpgate.Role) (map[string]*warpgate.Role, error) {
-	result := make(map[string]*warpgate.Role, len(roles))
-	for index := range roles {
-		role := &roles[index]
-		if _, exists := result[role.Name]; exists {
-			return nil, fmt.Errorf("Warpgate returned duplicate role name %q", role.Name)
-		}
-		result[role.Name] = role
+		result[key] = item
 	}
 	return result, nil
 }
@@ -444,14 +427,14 @@ func inventoryHasRoles(desired inventory.Inventory) bool {
 	return false
 }
 
-func isManagedRDSTarget(target warpgate.Target) (bool, error) {
+func (reconciler *Reconciler) isManagedTarget(target warpgate.Target) (bool, error) {
 	var metadata struct {
 		Kind string `json:"kind"`
 	}
 	if err := json.Unmarshal(target.Options, &metadata); err != nil {
 		return false, fmt.Errorf("decode current options: %w", err)
 	}
-	return metadata.Kind == warpgate.MySQLKind || metadata.Kind == warpgate.PostgresKind, nil
+	return (reconciler.syncDatabaseTargets && (metadata.Kind == warpgate.MySQLKind || metadata.Kind == warpgate.PostgresKind)) || (reconciler.syncHTTPTargets && metadata.Kind == warpgate.HTTPKind), nil
 }
 
 func groupMatches(desired inventory.Group, current warpgate.TargetGroup) bool {
@@ -459,42 +442,52 @@ func groupMatches(desired inventory.Group, current warpgate.TargetGroup) bool {
 }
 
 func targetMatches(desired inventory.Target, groupID string, current warpgate.Target) (bool, error) {
-	var metadata struct {
-		Kind string `json:"kind"`
-	}
-	if err := json.Unmarshal(current.Options, &metadata); err != nil {
-		return false, fmt.Errorf("decode current options: %w", err)
-	}
-	wanted, err := databaseOptions(desired)
+	wanted, err := targetOptions(desired)
 	if err != nil {
 		return false, err
 	}
 	var currentOptions any
 	switch desired.Engine {
-	case inventory.EngineMySQL:
-		if metadata.Kind != warpgate.MySQLKind {
-			return false, fmt.Errorf("existing target kind is %q, expected %q; refusing to change its kind", metadata.Kind, warpgate.MySQLKind)
+	case inventory.EngineHTTP:
+		var options warpgate.HTTPOptions
+		if err := json.Unmarshal(current.Options, &options); err != nil {
+			return false, fmt.Errorf("decode current HTTP options: %w", err)
 		}
+		if options.Kind != warpgate.HTTPKind {
+			return false, fmt.Errorf("existing target kind is %q, expected %q; refusing to change its kind", options.Kind, warpgate.HTTPKind)
+		}
+		wanted = mergeHTTPOptions(desired, wanted.(warpgate.HTTPOptions), options)
+		if options.Headers == nil {
+			options.Headers = map[string]string{}
+		}
+		if options.ExternalHost != nil && *options.ExternalHost == "" {
+			options.ExternalHost = nil
+		}
+		currentOptions = options
+	case inventory.EngineMySQL:
 		var options warpgate.MySQLOptions
 		if err := json.Unmarshal(current.Options, &options); err != nil {
 			return false, fmt.Errorf("decode current MySQL options: %w", err)
 		}
+		if options.Kind != warpgate.MySQLKind {
+			return false, fmt.Errorf("existing target kind is %q, expected %q; refusing to change its kind", options.Kind, warpgate.MySQLKind)
+		}
 		if wantedOptions, ok := wanted.(warpgate.MySQLOptions); ok {
-			clearComparablePasswords(&wantedOptions.Auth, &options.Auth, options.LegacyPassword)
+			wantedOptions.Auth, options.Auth = clearComparablePasswords(wantedOptions.Auth, options.Auth, options.LegacyPassword)
 			wanted = wantedOptions
 			options.LegacyPassword = ""
 		}
 		currentOptions = options
 	case inventory.EnginePostgres:
-		if metadata.Kind != warpgate.PostgresKind {
-			return false, fmt.Errorf("existing target kind is %q, expected %q; refusing to change its kind", metadata.Kind, warpgate.PostgresKind)
-		}
 		var options warpgate.PostgresOptions
 		if err := json.Unmarshal(current.Options, &options); err != nil {
 			return false, fmt.Errorf("decode current PostgreSQL options: %w", err)
 		}
+		if options.Kind != warpgate.PostgresKind {
+			return false, fmt.Errorf("existing target kind is %q, expected %q; refusing to change its kind", options.Kind, warpgate.PostgresKind)
+		}
 		if wantedOptions, ok := wanted.(warpgate.PostgresOptions); ok {
-			clearComparablePasswords(&wantedOptions.Auth, &options.Auth, options.LegacyPassword)
+			wantedOptions.Auth, options.Auth = clearComparablePasswords(wantedOptions.Auth, options.Auth, options.LegacyPassword)
 			wantedOptions.IdleTimeout = options.IdleTimeout
 			wanted = wantedOptions
 			options.LegacyPassword = ""
@@ -514,7 +507,7 @@ func groupRequest(group inventory.Group) warpgate.GroupRequest {
 }
 
 func targetRequest(target inventory.Target, groupID string, current *warpgate.Target) (warpgate.TargetRequest, error) {
-	options, err := databaseOptions(target)
+	options, err := targetOptions(target)
 	if err != nil {
 		return warpgate.TargetRequest{}, err
 	}
@@ -525,6 +518,13 @@ func targetRequest(target inventory.Target, groupID string, current *warpgate.Ta
 		Options:     options,
 	}
 	if current != nil {
+		if httpOptions, ok := request.Options.(warpgate.HTTPOptions); ok {
+			var currentOptions warpgate.HTTPOptions
+			if err := json.Unmarshal(current.Options, &currentOptions); err != nil {
+				return warpgate.TargetRequest{}, fmt.Errorf("decode current HTTP options: %w", err)
+			}
+			request.Options = mergeHTTPOptions(target, httpOptions, currentOptions)
+		}
 		if postgres, ok := request.Options.(warpgate.PostgresOptions); ok {
 			var currentOptions warpgate.PostgresOptions
 			if json.Unmarshal(current.Options, &currentOptions) == nil {
@@ -536,14 +536,21 @@ func targetRequest(target inventory.Target, groupID string, current *warpgate.Ta
 		request.TicketMaxDurationSeconds = current.TicketMaxDurationSeconds
 		request.TicketRequestsDisabled = current.TicketRequestsDisabled
 		request.TicketRequireApproval = current.TicketRequireApproval
+		request.RequireApproval = current.RequireApproval
 		request.TicketMaxUses = current.TicketMaxUses
 	}
 	return request, nil
 }
 
-func databaseOptions(target inventory.Target) (any, error) {
+func targetOptions(target inventory.Target) (any, error) {
 	tls := warpgate.TLS{Mode: string(target.TLSMode), Verify: target.TLSVerify}
 	switch target.Engine {
+	case inventory.EngineHTTP:
+		if target.HTTP == nil {
+			return nil, fmt.Errorf("HTTP target options are required")
+		}
+		options := warpgate.HTTPOptions{Kind: warpgate.HTTPKind, URL: target.HTTP.URL, TLS: tls, Headers: target.HTTP.Headers, ExternalHost: target.HTTP.ExternalHost}
+		return mergeHTTPOptions(target, options, warpgate.HTTPOptions{}), nil
 	case inventory.EngineMySQL:
 		return warpgate.MySQLOptions{
 			Kind: warpgate.MySQLKind, Host: target.Host, Port: target.Port,
@@ -561,21 +568,43 @@ func databaseOptions(target inventory.Target) (any, error) {
 	}
 }
 
+func mergeHTTPOptions(target inventory.Target, wanted, current warpgate.HTTPOptions) warpgate.HTTPOptions {
+	if !target.HTTP.HeadersSpecified {
+		wanted.Headers = current.Headers
+	}
+	wanted.Headers = maps.Clone(wanted.Headers)
+	if wanted.Headers == nil {
+		wanted.Headers = map[string]string{}
+	}
+	if target.HTTP.ExternalHost == nil {
+		wanted.ExternalHost = current.ExternalHost
+	}
+	if wanted.ExternalHost != nil && *wanted.ExternalHost == "" {
+		wanted.ExternalHost = nil
+	}
+	return wanted
+}
+
 func passwordAuth(password string) *warpgate.DatabaseAuth {
 	return &warpgate.DatabaseAuth{Kind: warpgate.PasswordAuthKind, Password: password}
 }
 
-func clearComparablePasswords(desired, current **warpgate.DatabaseAuth, legacyCurrent string) {
+// encryptedPasswordPrefix marks a password Warpgate has already encrypted server-side;
+// such values are never comparable to the plaintext password in the inventory CSV.
+const encryptedPasswordPrefix = "wgenc:v1:"
+
+func clearComparablePasswords(desired, current *warpgate.DatabaseAuth, legacyCurrent string) (*warpgate.DatabaseAuth, *warpgate.DatabaseAuth) {
 	currentPassword := legacyCurrent
-	if *current != nil {
-		currentPassword = (*current).Password
+	if current != nil {
+		currentPassword = current.Password
 	} else {
-		*current = passwordAuth(currentPassword)
+		current = passwordAuth(currentPassword)
 	}
-	if currentPassword == "" || strings.HasPrefix(currentPassword, "wgenc:v1:") {
-		(*desired).Password = ""
-		(*current).Password = ""
+	if currentPassword == "" || strings.HasPrefix(currentPassword, encryptedPasswordPrefix) {
+		desired.Password = ""
+		current.Password = ""
 	}
+	return desired, current
 }
 
 func stringValue(value *string) string {
@@ -583,4 +612,8 @@ func stringValue(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+func sortByName[T any](items []T, name func(T) string) {
+	sort.Slice(items, func(i, j int) bool { return name(items[i]) < name(items[j]) })
 }

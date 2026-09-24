@@ -22,14 +22,16 @@ type Warpgate struct {
 }
 
 type Inventory struct {
-	Groups  string `yaml:"groups"`
-	Targets string `yaml:"targets"`
+	Groups          string `yaml:"groups"`
+	DatabaseTargets string `yaml:"database_targets"`
+	HTTPTargets     string `yaml:"http_targets"`
 }
 
 type Apply struct {
-	UpdatePasswords bool `yaml:"update_passwords"`
-	SyncRoles       bool `yaml:"sync_roles"`
-	SyncTargets     bool `yaml:"sync_targets"`
+	UpdatePasswords     bool `yaml:"update_passwords"`
+	SyncRoles           bool `yaml:"sync_roles"`
+	SyncDatabaseTargets bool `yaml:"sync_database_targets"`
+	SyncHTTPTargets     bool `yaml:"sync_http_targets"`
 }
 
 func Parse(input io.Reader) (File, error) {
@@ -54,19 +56,23 @@ func Parse(input io.Reader) (File, error) {
 	if result.Inventory.Groups == "" {
 		return File{}, errors.New("inventory.groups is required")
 	}
-	if result.Inventory.Targets == "" {
-		return File{}, errors.New("inventory.targets is required")
+	if result.Inventory.DatabaseTargets == "" && result.Inventory.HTTPTargets == "" {
+		return File{}, errors.New("at least one of inventory.database_targets or inventory.http_targets is required")
 	}
 	return result, nil
 }
 
 func (config File) ResolvePaths(configPath string) File {
 	baseDirectory := filepath.Dir(configPath)
-	if !filepath.IsAbs(config.Inventory.Groups) {
-		config.Inventory.Groups = filepath.Clean(filepath.Join(baseDirectory, config.Inventory.Groups))
-	}
-	if !filepath.IsAbs(config.Inventory.Targets) {
-		config.Inventory.Targets = filepath.Clean(filepath.Join(baseDirectory, config.Inventory.Targets))
-	}
+	config.Inventory.Groups = resolvePath(baseDirectory, config.Inventory.Groups)
+	config.Inventory.DatabaseTargets = resolvePath(baseDirectory, config.Inventory.DatabaseTargets)
+	config.Inventory.HTTPTargets = resolvePath(baseDirectory, config.Inventory.HTTPTargets)
 	return config
+}
+
+func resolvePath(baseDirectory, path string) string {
+	if path == "" || filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Clean(filepath.Join(baseDirectory, path))
 }

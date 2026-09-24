@@ -67,7 +67,7 @@ func TestPlanSyncsUnlistedRDSTargetsInManagedGroups(t *testing.T) {
 		Targets: []inventory.Target{mysqlInventoryTarget("mysql-a", "environment-a", "mysql-a.example.invalid")},
 	}
 
-	plan, err := New(api, WithTargetSync()).Plan(context.Background(), desired)
+	plan, err := New(api, WithDatabaseTargetSync()).Plan(context.Background(), desired)
 	if err != nil {
 		t.Fatalf("Plan() error = %v", err)
 	}
@@ -87,7 +87,7 @@ func TestPlanTargetSyncDeletesAllRDSFromEmptyManagedGroup(t *testing.T) {
 	}
 	desired := inventory.Inventory{Groups: []inventory.Group{{Name: "environment-a"}}}
 
-	plan, err := New(api, WithTargetSync()).Plan(context.Background(), desired)
+	plan, err := New(api, WithDatabaseTargetSync()).Plan(context.Background(), desired)
 	if err != nil || plan.Summary() != (Summary{Delete: 1, Unchanged: 1}) {
 		t.Fatalf("Plan() = %#v, %v", plan.Summary(), err)
 	}
@@ -98,7 +98,7 @@ func TestPlanTargetSyncRejectsMalformedUnlistedTargetOptions(t *testing.T) {
 		groups:  []warpgate.TargetGroup{{ID: "group-a", Name: "environment-a"}},
 		targets: []warpgate.Target{{ID: "target-id", Name: "unknown", GroupID: "group-a", Options: json.RawMessage(`{`)}},
 	}
-	_, err := New(api, WithTargetSync()).Plan(context.Background(), inventory.Inventory{
+	_, err := New(api, WithDatabaseTargetSync()).Plan(context.Background(), inventory.Inventory{
 		Groups: []inventory.Group{{Name: "environment-a"}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "classify target") {
@@ -434,7 +434,7 @@ func TestPlanErrors(t *testing.T) {
 			Targets: []inventory.Target{mysqlInventoryTarget("mysql-a", "environment-a", "mysql-a.example.invalid")},
 		}
 		_, err := New(api).Plan(context.Background(), withTarget)
-		if err == nil || !strings.Contains(err.Error(), "decode current options") {
+		if err == nil || !strings.Contains(err.Error(), "decode current MySQL options") {
 			t.Fatalf("Plan() error = %v", err)
 		}
 	})
@@ -476,7 +476,7 @@ func TestApplyDeletesUnlistedRDSTargets(t *testing.T) {
 	}
 	desired := inventory.Inventory{Groups: []inventory.Group{{Name: "environment-a"}}}
 
-	plan, err := New(api, WithTargetSync()).Apply(context.Background(), desired)
+	plan, err := New(api, WithDatabaseTargetSync()).Apply(context.Background(), desired)
 	if err != nil || plan.Summary() != (Summary{Delete: 1, Unchanged: 1}) {
 		t.Fatalf("Apply() = %#v, %v", plan.Summary(), err)
 	}
@@ -767,7 +767,7 @@ func TestApplyMutationErrors(t *testing.T) {
 				options = append(options, WithRoleSync())
 			}
 			if name == "delete target" {
-				options = append(options, WithTargetSync())
+				options = append(options, WithDatabaseTargetSync())
 			}
 			_, err := New(tt.api, options...).Apply(context.Background(), tt.desired)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {

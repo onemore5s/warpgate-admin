@@ -11,11 +11,11 @@ const validYAML = `warpgate:
   insecure_skip_verify: true
 inventory:
   groups: groups.csv
-  targets: targets.csv
+  database_targets: database-targets.csv
 apply:
   update_passwords: true
   sync_roles: true
-  sync_targets: true
+  sync_database_targets: true
 `
 
 func TestParse(t *testing.T) {
@@ -26,7 +26,7 @@ func TestParse(t *testing.T) {
 	if got.Warpgate.Host != "https://warpgate.example.invalid" || got.Warpgate.Token != "token-placeholder" || !got.Warpgate.InsecureSkipVerify {
 		t.Fatalf("Warpgate = %#v", got.Warpgate)
 	}
-	if got.Inventory.Groups != "groups.csv" || got.Inventory.Targets != "targets.csv" || !got.Apply.UpdatePasswords || !got.Apply.SyncRoles || !got.Apply.SyncTargets {
+	if got.Inventory.Groups != "groups.csv" || got.Inventory.DatabaseTargets != "database-targets.csv" || !got.Apply.UpdatePasswords || !got.Apply.SyncRoles || !got.Apply.SyncDatabaseTargets {
 		t.Fatalf("Config = %#v", got)
 	}
 }
@@ -34,12 +34,12 @@ func TestParse(t *testing.T) {
 func TestParseDefaultsSyncOptionsToFalse(t *testing.T) {
 	got, err := Parse(strings.NewReader(`inventory:
   groups: groups.csv
-  targets: targets.csv
+  database_targets: database-targets.csv
 `))
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	if got.Apply.SyncRoles || got.Apply.SyncTargets {
+	if got.Apply.SyncRoles || got.Apply.SyncDatabaseTargets {
 		t.Fatalf("Apply = %#v", got.Apply)
 	}
 }
@@ -47,7 +47,7 @@ func TestParseDefaultsSyncOptionsToFalse(t *testing.T) {
 func TestParseAllowsMissingWarpgateConnectionForValidate(t *testing.T) {
 	input := `inventory:
   groups: groups.csv
-  targets: targets.csv
+  database_targets: database-targets.csv
 `
 	got, err := Parse(strings.NewReader(input))
 	if err != nil {
@@ -69,7 +69,7 @@ func TestParseRejectsInvalidConfig(t *testing.T) {
 		"nested unknown":  {strings.Replace(validYAML, "  host:", "  unexpected: true\n  host:", 1), "field unexpected"},
 		"multiple docs":   {validYAML + "---\ninventory: {}\n", "one YAML document"},
 		"missing groups":  {strings.Replace(validYAML, "  groups: groups.csv\n", "", 1), "inventory.groups"},
-		"missing targets": {strings.Replace(validYAML, "  targets: targets.csv\n", "", 1), "inventory.targets"},
+		"missing targets": {strings.Replace(validYAML, "  database_targets: database-targets.csv\n", "", 1), "inventory.database_targets"},
 		"old token env":   {strings.Replace(validYAML, "  token: token-placeholder", "  token_env: WARPGATE_TOKEN", 1), "field token_env"},
 	}
 	for name, tt := range tests {
@@ -83,9 +83,9 @@ func TestParseRejectsInvalidConfig(t *testing.T) {
 }
 
 func TestResolvePaths(t *testing.T) {
-	input := File{Inventory: Inventory{Groups: "../inventory/groups.csv", Targets: "/absolute/targets.csv"}}
+	input := File{Inventory: Inventory{Groups: "../inventory/groups.csv", DatabaseTargets: "/absolute/database-targets.csv"}}
 	got := input.ResolvePaths("/workspace/config/warpgate-admin.yaml")
-	if got.Inventory.Groups != "/workspace/inventory/groups.csv" || got.Inventory.Targets != "/absolute/targets.csv" {
+	if got.Inventory.Groups != "/workspace/inventory/groups.csv" || got.Inventory.DatabaseTargets != "/absolute/database-targets.csv" {
 		t.Fatalf("ResolvePaths() = %#v", got.Inventory)
 	}
 	if input.Inventory.Groups != "../inventory/groups.csv" {

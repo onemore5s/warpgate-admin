@@ -26,7 +26,7 @@ const commandConfigYAML = `warpgate:
   insecure_skip_verify: true
 inventory:
   groups: groups.csv
-  targets: targets.csv
+  database_targets: targets.csv
 apply:
   update_passwords: true
 `
@@ -59,20 +59,24 @@ func TestRunWithYAMLConfig(t *testing.T) {
 	}
 }
 
-func TestRunFlagsOverrideYAMLInventoryPaths(t *testing.T) {
-	configYAML := strings.Replace(commandConfigYAML, "groups.csv", "ignored-groups.csv", 1)
-	configYAML = strings.Replace(configYAML, "targets.csv", "ignored-targets.csv", 1)
+func TestRunUsesYAMLInventoryPaths(t *testing.T) {
+	configYAML := strings.Replace(commandConfigYAML, "groups.csv", "../inventories/groups.csv", 1)
+	configYAML = strings.Replace(configYAML, "targets.csv", "../inventories/database-targets.csv", 1)
 	deps := testDependencies(commandGroupsCSV, commandTargetsCSV, &commandAPI{})
-	baseOpen := deps.openFile
-	deps.openFile = func(name string) (io.ReadCloser, error) {
-		if name == "config.yaml" {
-			return io.NopCloser(strings.NewReader(configYAML)), nil
-		}
-		return baseOpen(name)
+	files := map[string]string{
+		"config/warpgate-admin.yaml":       configYAML,
+		"inventories/groups.csv":           commandGroupsCSV,
+		"inventories/database-targets.csv": commandTargetsCSV,
 	}
-	args := append(commandArgs("validate"), "--config", "config.yaml")
+	deps.openFile = func(name string) (io.ReadCloser, error) {
+		content, ok := files[name]
+		if !ok {
+			return nil, errors.New("unexpected path " + name)
+		}
+		return io.NopCloser(strings.NewReader(content)), nil
+	}
 	stdout, stderr := &strings.Builder{}, &strings.Builder{}
-	if code := run(context.Background(), args, deps, stdout, stderr); code != 0 || !strings.Contains(stdout.String(), "1 group, 1 target") {
+	if code := run(context.Background(), configuredCommandArgs("validate"), deps, stdout, stderr); code != 0 || !strings.Contains(stdout.String(), "1 group, 1 target") {
 		t.Fatalf("run() = %d, stdout = %q, stderr = %q", code, stdout, stderr)
 	}
 }
@@ -101,7 +105,7 @@ func TestRunYAMLConfigIgnoresWarpgateEnvironment(t *testing.T) {
 
 func TestRunValidate(t *testing.T) {
 	stdout, stderr := &strings.Builder{}, &strings.Builder{}
-	code := run(context.Background(), commandArgs("validate"), testDependencies(commandGroupsCSV, commandTargetsCSV, &commandAPI{}), stdout, stderr)
+	code := run(context.Background(), configuredCommandArgs("validate"), testDependencies(commandGroupsCSV, commandTargetsCSV, &commandAPI{}), stdout, stderr)
 	if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "1 group, 1 target") {
 		t.Fatalf("run() = %d, stdout = %q, stderr = %q", code, stdout, stderr)
 	}
@@ -180,7 +184,7 @@ func TestRunApplySyncsTargetRolesFromYAMLConfig(t *testing.T) {
 }
 
 func TestRunApplySyncsTargetsFromYAMLConfig(t *testing.T) {
-	configYAML := strings.Replace(commandConfigYAML, "  update_passwords: true", "  update_passwords: false\n  sync_targets: true", 1)
+	configYAML := strings.Replace(commandConfigYAML, "  update_passwords: true", "  update_passwords: false\n  sync_database_targets: true", 1)
 	color := "Info"
 	api := &commandAPI{
 		groups:  []warpgate.TargetGroup{{ID: "group-id", Name: "environment-a", Description: "Environment A", Color: &color}},
@@ -220,11 +224,32 @@ func TestRunResolvesPasswordEnvironmentVariable(t *testing.T) {
 	}
 }
 
-func TestRunAcceptsPasswordUpdateFlag(t *testing.T) {
-	stdout, stderr := &strings.Builder{}, &strings.Builder{}
-	args := append(configuredCommandArgs("plan"), "--update-passwords")
-	if code := run(context.Background(), args, testDependencies(commandGroupsCSV, commandTargetsCSV, &commandAPI{}), stdout, stderr); code != 0 {
-		t.Fatalf("run() = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+func TestRunPasswordUpdatePolicyFromYAML(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		configYAML := commandConfigYAML
+		if !enabled {
+			configYAML = strings.Replace(configYAML, "update_passwords: true", "update_passwords: false", 1)
+		}
+		current := mysqlCommandTarget("target-id", "mysql-a", "group-id", "mysql-a.example.invalid")
+		current.Description = "MySQL RDS"
+		color := "Info"
+		api := &commandAPI{
+			groups:  []warpgate.TargetGroup{{ID: "group-id", Name: "environment-a", Description: "Environment A", Color: &color}},
+			targets: []warpgate.Target{current},
+		}
+		deps := testDependencies(commandGroupsCSV, commandTargetsCSV, api)
+		deps.openFile = configFiles(configYAML, commandGroupsCSV, commandTargetsCSV)
+		stdout, stderr := &strings.Builder{}, &strings.Builder{}
+		if code := run(context.Background(), configuredCommandArgs("apply"), deps, stdout, stderr); code != 0 {
+			t.Fatalf("run() = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+		}
+		want := 0
+		if enabled {
+			want = 1
+		}
+		if len(api.updatedTargets) != want {
+			t.Fatalf("update_passwords=%v: got %d updates, want %d", enabled, len(api.updatedTargets), want)
+		}
 	}
 }
 
@@ -246,7 +271,7 @@ func TestRunCommandHelpAndZeroPlural(t *testing.T) {
 	emptyTargets := "enabled,group,name,description,engine,host,port,username,password,password_env,tls_mode,tls_verify,default_database_name,protocol_version\n"
 	stdout.Reset()
 	stderr.Reset()
-	if code := run(context.Background(), commandArgs("validate"), testDependencies(emptyGroups, emptyTargets, &commandAPI{}), stdout, stderr); code != 0 || !strings.Contains(stdout.String(), "0 groups, 0 targets") {
+	if code := run(context.Background(), configuredCommandArgs("validate"), testDependencies(emptyGroups, emptyTargets, &commandAPI{}), stdout, stderr); code != 0 || !strings.Contains(stdout.String(), "0 groups, 0 targets") {
 		t.Fatalf("run(validate) = %d, stdout = %q, stderr = %q", code, stdout, stderr)
 	}
 }
@@ -280,27 +305,35 @@ func TestRunErrors(t *testing.T) {
 	}{
 		"missing command": {nil, base, "Usage"},
 		"unknown command": {[]string{"destroy"}, base, "Unknown command"},
-		"missing files":   {[]string{"validate"}, base, "--groups"},
-		"missing targets": {[]string{"validate", "--groups", "groups.csv"}, base, "--targets"},
+		"missing config":  {[]string{"validate"}, base, "--config"},
+		"empty config":    {[]string{"validate", "--config="}, base, "--config"},
 		"bad flag":        {[]string{"validate", "--unknown"}, base, "flag provided"},
-		"position arg":    {append(commandArgs("validate"), "extra"), base, "Positional arguments"},
+		"position arg":    {append(configuredCommandArgs("validate"), "extra"), base, "Positional arguments"},
 		"open groups": {
-			commandArgs("validate"),
-			dependencies{getenv: func(string) string { return "" }, openFile: func(string) (io.ReadCloser, error) { return nil, errors.New("missing groups") }},
-			"missing groups",
+			configuredCommandArgs("validate"),
+			dependencies{getenv: func(string) string { return "" }, openFile: func(name string) (io.ReadCloser, error) {
+				if name == "config/warpgate-admin.yaml" {
+					return io.NopCloser(strings.NewReader(commandConfigYAML)), nil
+				}
+				return nil, errors.New("missing groups")
+			}},
+			"Failed to open groups inventory: missing groups",
 		},
 		"open targets": {
-			commandArgs("validate"),
+			configuredCommandArgs("validate"),
 			dependencies{getenv: func(string) string { return "" }, openFile: func(name string) (io.ReadCloser, error) {
-				if name == "groups.csv" {
+				if name == "config/warpgate-admin.yaml" {
+					return io.NopCloser(strings.NewReader(commandConfigYAML)), nil
+				}
+				if name == "config/groups.csv" {
 					return io.NopCloser(strings.NewReader(commandGroupsCSV)), nil
 				}
 				return nil, errors.New("missing targets")
 			}},
-			"missing targets",
+			"Failed to open database targets inventory: missing targets",
 		},
-		"parse groups":  {commandArgs("validate"), testDependencies("bad-header\n", commandTargetsCSV, &commandAPI{}), "unknown column"},
-		"parse targets": {commandArgs("validate"), testDependencies(commandGroupsCSV, "bad-header\n", &commandAPI{}), "unknown column"},
+		"parse groups":  {configuredCommandArgs("validate"), testDependencies("bad-header\n", commandTargetsCSV, &commandAPI{}), "unknown column"},
+		"parse targets": {configuredCommandArgs("validate"), testDependencies(commandGroupsCSV, "bad-header\n", &commandAPI{}), "unknown column"},
 		"missing host": {
 			configuredCommandArgs("plan"),
 			dependencies{getenv: func(string) string { return "" }, openFile: configFiles(strings.Replace(commandConfigYAML, "  host: https://yaml-warpgate.example.invalid\n", "", 1), commandGroupsCSV, commandTargetsCSV)},
@@ -366,10 +399,6 @@ func TestRunAcceptsInsecureTLSConfiguration(t *testing.T) {
 	}
 }
 
-func commandArgs(command string) []string {
-	return []string{command, "--groups", "groups.csv", "--targets", "targets.csv"}
-}
-
 func configuredCommandArgs(command string) []string {
 	return []string{command, "--config", "config/warpgate-admin.yaml"}
 }
@@ -381,19 +410,6 @@ func testDependencies(groupsCSV, targetsCSV string, api reconcile.API) dependenc
 		newAPI: func(warpgate.Config) (reconcile.API, error) {
 			return api, nil
 		},
-	}
-}
-
-func csvFiles(groupsCSV, targetsCSV string) func(string) (io.ReadCloser, error) {
-	return func(name string) (io.ReadCloser, error) {
-		switch name {
-		case "groups.csv":
-			return io.NopCloser(strings.NewReader(groupsCSV)), nil
-		case "targets.csv":
-			return io.NopCloser(strings.NewReader(targetsCSV)), nil
-		default:
-			return nil, errors.New("unexpected file")
-		}
 	}
 }
 
