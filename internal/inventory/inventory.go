@@ -21,6 +21,7 @@ type Engine string
 const (
 	EngineMySQL    Engine = "mysql"
 	EnginePostgres Engine = "postgres"
+	EngineHTTP     Engine = "http"
 )
 
 type TLSMode string
@@ -53,6 +54,7 @@ type Target struct {
 	TLSVerify           bool
 	DefaultDatabaseName string
 	ProtocolVersion     string
+	HTTP                *HTTP
 }
 
 type Inventory struct {
@@ -95,13 +97,34 @@ var validColors = map[string]struct{}{
 var environmentVariablePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func Parse(groupsInput, targetsInput io.Reader) (Inventory, error) {
+	return ParseSources(groupsInput, targetsInput, nil)
+}
+
+func ParseSources(groupsInput, databaseInput, httpInput io.Reader) (Inventory, error) {
 	groups, err := parseGroups(groupsInput)
 	if err != nil {
 		return Inventory{}, fmt.Errorf("groups CSV: %w", err)
 	}
-	targets, err := parseTargets(targetsInput, groups)
-	if err != nil {
-		return Inventory{}, fmt.Errorf("targets CSV: %w", err)
+	var targets []Target
+	if databaseInput != nil {
+		targets, err = parseTargets(databaseInput, groups)
+		if err != nil {
+			return Inventory{}, fmt.Errorf("database targets CSV: %w", err)
+		}
+	}
+	if httpInput != nil {
+		httpTargets, err := parseHTTP(httpInput, groups)
+		if err != nil {
+			return Inventory{}, fmt.Errorf("HTTP targets YAML: %w", err)
+		}
+		targets = append(targets, httpTargets...)
+	}
+	names := make(map[string]bool)
+	for _, target := range targets {
+		if names[target.Name] {
+			return Inventory{}, fmt.Errorf("duplicate target %q across inventories", target.Name)
+		}
+		names[target.Name] = true
 	}
 	return Inventory{Groups: groups, Targets: targets}, nil
 }
