@@ -9,6 +9,8 @@
 
 Configure at least one database or HTTP inventory. HTTP-only management is supported.
 
+For Redis terminal access, see the [redis-toolbox deployment and operations guide](docs/redis-toolbox.md), covering OS accounts, shared configuration, SSH forced commands, and Warpgate integration.
+
 ## Workflow
 
 ```text
