@@ -11,6 +11,16 @@ Configure at least one database or HTTP inventory. HTTP-only management is suppo
 
 For Redis terminal access, see the [redis-toolbox deployment and operations guide](docs/redis-toolbox.md), covering OS accounts, shared configuration, SSH forced commands, and Warpgate integration.
 
+## Warpgate version compatibility
+
+Compatibility covers the existing Target Group, MySQL / PostgreSQL / HTTP Target, and role assignment workflows. See the [API compatibility guide](docs/warpgate-compatibility.md) for the version matrix, verification steps, and limitations.
+
+Starting with 0.29.0, Target creation and updates must explicitly include `ticket_requests_disabled`, `ticket_require_approval`, and `require_approval`. New targets retain the earlier defaults of `false` for all three fields; updates preserve existing server policies. Fields absent from older responses use their respective defaults. Existing inventory formats do not need to change.
+
+Validate upgrades with `plan → apply → plan` against dedicated test targets. Confirm that the second plan has no unexpected changes and that existing approval policies remain intact. Running `plan` alone does not verify write requests against the new API requirements.
+
+Run unit regression tests with `go test ./...`. For optional container integration tests, run `python3 scripts/test-warpgate-compatibility.py` with local Docker and the corresponding official images. This script is not required for normal CLI operation and is not invoked by `go test`.
+
 ## Workflow
 
 ```text
@@ -140,7 +150,7 @@ See the [group template](data/example/groups.example.csv).
 | `tls_mode` | No | `disabled`, `preferred`, or `required`. Defaults to `required`. |
 | `tls_verify` | No | Defaults to `true`. |
 | `default_database_name` | No | Default database name. |
-| `protocol_version` | No | PostgreSQL supports `3.0` or `3.2`. Must be empty for MySQL. |
+| `protocol_version` | No | PostgreSQL supports `3.0` or `3.2`. When empty, preserves the existing target's version, or uses `3.2` for a new target or a legacy response without a version. Writes always include the resolved version. Must be empty for MySQL. |
 
 See the [database template](data/example/database-targets.example.csv). Every template column except `roles` must be present. Columns may appear in any order; unknown columns are rejected and blank rows are ignored. Cells may be left empty as described above.
 
