@@ -36,6 +36,16 @@ const (
 	ActionUnchanged Action = "unchanged"
 )
 
+// Preserve earlier defaults for new targets; since 0.29.0, writes must include them explicitly.
+const (
+	defaultTicketRequestsDisabled = false
+	defaultTicketRequireApproval  = false
+	defaultRequireApproval        = false
+)
+
+// Match Warpgate's default when neither the inventory nor the existing target specifies a version.
+const defaultPostgresProtocolVersion = "3.2"
+
 type Summary struct {
 	Create    int
 	Update    int
@@ -488,6 +498,8 @@ func targetMatches(desired inventory.Target, groupID string, current warpgate.Ta
 		}
 		if wantedOptions, ok := wanted.(warpgate.PostgresOptions); ok {
 			wantedOptions.Auth, options.Auth = clearComparablePasswords(wantedOptions.Auth, options.Auth, options.LegacyPassword)
+			wantedOptions.ProtocolVersion = postgresProtocolVersion(desired.ProtocolVersion, options.ProtocolVersion)
+			options.ProtocolVersion = postgresProtocolVersion(options.ProtocolVersion, "")
 			wantedOptions.IdleTimeout = options.IdleTimeout
 			wanted = wantedOptions
 			options.LegacyPassword = ""
@@ -528,6 +540,7 @@ func targetRequest(target inventory.Target, groupID string, current *warpgate.Ta
 		if postgres, ok := request.Options.(warpgate.PostgresOptions); ok {
 			var currentOptions warpgate.PostgresOptions
 			if json.Unmarshal(current.Options, &currentOptions) == nil {
+				postgres.ProtocolVersion = postgresProtocolVersion(target.ProtocolVersion, currentOptions.ProtocolVersion)
 				postgres.IdleTimeout = currentOptions.IdleTimeout
 				request.Options = postgres
 			}
@@ -539,7 +552,17 @@ func targetRequest(target inventory.Target, groupID string, current *warpgate.Ta
 		request.RequireApproval = current.RequireApproval
 		request.TicketMaxUses = current.TicketMaxUses
 	}
+	request.TicketRequestsDisabled = approvalPolicyValue(request.TicketRequestsDisabled, defaultTicketRequestsDisabled)
+	request.TicketRequireApproval = approvalPolicyValue(request.TicketRequireApproval, defaultTicketRequireApproval)
+	request.RequireApproval = approvalPolicyValue(request.RequireApproval, defaultRequireApproval)
 	return request, nil
+}
+
+func approvalPolicyValue(value *bool, fallback bool) *bool {
+	if value != nil {
+		return value
+	}
+	return &fallback
 }
 
 func targetOptions(target inventory.Target) (any, error) {
@@ -561,11 +584,21 @@ func targetOptions(target inventory.Target) (any, error) {
 		return warpgate.PostgresOptions{
 			Kind: warpgate.PostgresKind, Host: target.Host, Port: target.Port,
 			Username: target.Username, Auth: passwordAuth(target.Password), TLS: tls,
-			DefaultDatabaseName: target.DefaultDatabaseName, ProtocolVersion: target.ProtocolVersion,
+			DefaultDatabaseName: target.DefaultDatabaseName, ProtocolVersion: postgresProtocolVersion(target.ProtocolVersion, ""),
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported RDS engine %q", target.Engine)
 	}
+}
+
+func postgresProtocolVersion(configured, current string) string {
+	if configured != "" {
+		return configured
+	}
+	if current != "" {
+		return current
+	}
+	return defaultPostgresProtocolVersion
 }
 
 func mergeHTTPOptions(target inventory.Target, wanted, current warpgate.HTTPOptions) warpgate.HTTPOptions {
